@@ -39,7 +39,7 @@ func (r *RedisSemanticCacheRepo) EnsureIndex(ctx context.Context) error {
 		"SCHEMA",
 		"embedding", "VECTOR", "HNSW", "6",
 		"TYPE", "FLOAT32",
-		"DIM", "384",
+		"DIM", "768",
 		"DISTANCE_METRIC", "COSINE",
 		"response", "TEXT",
 		"created_at", "NUMERIC", "SORTABLE",
@@ -72,13 +72,13 @@ func (r *RedisSemanticCacheRepo) FindSimilar(ctx context.Context, embedding []fl
 	embBytes := embeddingToBytes(embedding)
 
 	// FT.SEARCH with KNN vector query
-	result, err := r.client.Do(ctx,
+	raw, err := r.client.Do(ctx,
 		"FT.SEARCH", "idx:prompt_cache",
 		"*=>[KNN 1 @embedding $vec AS score]",
 		"PARAMS", "2", "vec", embBytes,
 		"SORTBY", "score",
 		"DIALECT", "2",
-	).Slice()
+	).Result()
 
 	if err != nil {
 		if errors.Is(err, goredis.Nil) {
@@ -87,18 +87,68 @@ func (r *RedisSemanticCacheRepo) FindSimilar(ctx context.Context, embedding []fl
 		return nil, fmt.Errorf("redis: FT.SEARCH idx:prompt_cache: %w", err)
 	}
 
-	// result[0] is the total count, followed by pairs of (key, fields...)
-	if len(result) < 2 {
+	// Redis Stack DIALECT 2 returns a map[interface{}]interface{} with "total_results" and "results" keys.
+	resultMap, ok := raw.(map[interface{}]interface{})
+	if !ok {
+		// Fallback: older Redis returns []interface{} — handle that too.
+		return r.parseLegacySearchResult(raw, threshold)
+	}
+
+	totalRaw, ok := resultMap["total_results"]
+	if !ok {
+		return []domain.TipCard{}, nil
+	}
+	total, _ := totalRaw.(int64)
+	if total == 0 {
 		return []domain.TipCard{}, nil
 	}
 
-	count, ok := result[0].(int64)
-	if !ok || count == 0 {
+	results, ok := resultMap["results"].([]interface{})
+	if !ok || len(results) == 0 {
 		return []domain.TipCard{}, nil
 	}
 
-	// Parse the first result: result[1] = key, result[2] = field-value pairs
-	if len(result) < 3 {
+	// Each result is a map with "id", "extra_attributes" keys.
+	firstResult, ok := results[0].(map[interface{}]interface{})
+	if !ok {
+		return []domain.TipCard{}, nil
+	}
+
+	attrs, ok := firstResult["extra_attributes"].(map[interface{}]interface{})
+	if !ok {
+		return []domain.TipCard{}, nil
+	}
+
+	scoreStr, _ := attrs["score"].(string)
+	responseStr, _ := attrs["response"].(string)
+	if scoreStr == "" || responseStr == "" {
+		return []domain.TipCard{}, nil
+	}
+
+	var score float64
+	if _, err := fmt.Sscanf(scoreStr, "%f", &score); err != nil {
+		return []domain.TipCard{}, nil
+	}
+	if score > threshold {
+		return []domain.TipCard{}, nil
+	}
+
+	var cards []domain.TipCard
+	if err := json.Unmarshal([]byte(responseStr), &cards); err != nil {
+		return nil, fmt.Errorf("redis: unmarshal cached response: %w", err)
+	}
+	return cards, nil
+}
+
+// parseLegacySearchResult handles the older []interface{} FT.SEARCH response format.
+func (r *RedisSemanticCacheRepo) parseLegacySearchResult(raw interface{}, threshold float64) ([]domain.TipCard, error) {
+	result, ok := raw.([]interface{})
+	if !ok || len(result) < 3 {
+		return []domain.TipCard{}, nil
+	}
+
+	count, _ := result[0].(int64)
+	if count == 0 {
 		return []domain.TipCard{}, nil
 	}
 
@@ -107,7 +157,6 @@ func (r *RedisSemanticCacheRepo) FindSimilar(ctx context.Context, embedding []fl
 		return []domain.TipCard{}, nil
 	}
 
-	// Extract score and response from field-value pairs
 	fieldMap := make(map[string]string)
 	for i := 0; i+1 < len(fields); i += 2 {
 		k, ok1 := fields[i].(string)
@@ -123,13 +172,10 @@ func (r *RedisSemanticCacheRepo) FindSimilar(ctx context.Context, embedding []fl
 		return []domain.TipCard{}, nil
 	}
 
-	// Parse cosine distance score
 	var score float64
 	if _, err := fmt.Sscanf(scoreStr, "%f", &score); err != nil {
 		return []domain.TipCard{}, nil
 	}
-
-	// Cache hit only if score (cosine distance) is within threshold
 	if score > threshold {
 		return []domain.TipCard{}, nil
 	}
@@ -138,7 +184,6 @@ func (r *RedisSemanticCacheRepo) FindSimilar(ctx context.Context, embedding []fl
 	if err := json.Unmarshal([]byte(responseStr), &cards); err != nil {
 		return nil, fmt.Errorf("redis: unmarshal cached response: %w", err)
 	}
-
 	return cards, nil
 }
 
