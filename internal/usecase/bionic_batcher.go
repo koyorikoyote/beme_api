@@ -2,8 +2,10 @@ package usecase
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/beme/beme/internal/domain"
@@ -141,26 +143,53 @@ func (b *BionicBatcherUseCase) dispatch(ctx context.Context, batch []domain.Chat
 	}
 }
 
+// batchContentHash returns a short SHA-256 hex digest of the message IDs and
+// contents in the batch. Embedding this in the prompt ensures that each unique
+// set of chat messages produces a distinct vector, preventing stale cache hits
+// when chat content changes between windows.
+func batchContentHash(batch []domain.ChatMessage) string {
+	var sb strings.Builder
+	for _, msg := range batch {
+		sb.WriteString(msg.MessageID)
+		sb.WriteByte('|')
+		sb.WriteString(msg.Content)
+		sb.WriteByte('\n')
+	}
+	sum := sha256.Sum256([]byte(sb.String()))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
 // buildPrompt constructs the batch prompt sent to the LLM.
 // Bionic-priority messages must already be sorted to the top of batch before calling.
+// A content hash is embedded so that each unique batch of messages produces a
+// distinct embedding, preventing stale cache hits when chat content changes.
 func buildPrompt(batch []domain.ChatMessage) string {
-	msgs := ""
+	var sb strings.Builder
 	for i, msg := range batch {
-		msgs += fmt.Sprintf("%d. [%s] %s\n", i+1, msg.DisplayName, msg.Content)
+		tag := ""
+		if msg.Priority == domain.PriorityBionic {
+			tag = " [⚡]"
+		}
+		fmt.Fprintf(&sb, "%d. [%s]%s %s\n", i+1, msg.DisplayName, tag, msg.Content)
 	}
-	return fmt.Sprintf(`Analyze these chat messages and output ONLY a JSON array. Use curly braces for objects.
+	hash := batchContentHash(batch)
+	n := len(batch)
+	return fmt.Sprintf(`You are analyzing a batch of live stream chat messages. Synthesize the key themes into meaningful, actionable tip cards for the streamer's HUD.
 
-Example output format:
-[{"tip_type":"sentiment","message":"Chat is excited about the stream","expert_handle":"system","sentiment_score":0.9,"batch_id":"batch-1"},{"tip_type":"expert_tip","message":"Try using hotkeys for faster gameplay","expert_handle":"ProGamer99","sentiment_score":0.8,"batch_id":"batch-1"}]
+Output ONLY a JSON array of 1-3 tip cards. No markdown, no explanation.
+
+Example:
+[{"tip_type":"sentiment","message":"Chat is hyped about the boss fight — keep the energy up","expert_handle":"system","sentiment_score":0.88,"batch_id":"batch-%d"},{"tip_type":"expert_tip","message":"ProGamer99 suggests using the dodge roll here","expert_handle":"ProGamer99","sentiment_score":0.75,"batch_id":"batch-%d"}]
 
 Rules:
-- tip_type must be one of: sentiment, expert_tip, highlight
-- message must be under 100 characters
-- sentiment_score must be a number between 0.0 and 1.0
-- batch_id must be "batch-%d"
-- expert_handle is the chatter's display name, or "system" if none applies
-- Output ONLY the JSON array, nothing else
+- tip_type: "sentiment" for mood/energy summaries, "expert_tip" for actionable advice from a chatter, "highlight" for notable moments
+- message: a synthesized, meaningful insight (not a quote) — max 100 characters
+- sentiment_score: 0.0 to 1.0
+- batch_id: "batch-%d"
+- expert_handle: the most relevant chatter's display name, or "system"
+- Prioritize messages marked [⚡] (bionic priority)
+- Output ONLY the JSON array
 
-Chat messages:
-%s`, len(batch), msgs)
+[hash:%s] Chat messages:
+%s`, n, n, n, hash, sb.String())
 }

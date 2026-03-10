@@ -76,8 +76,8 @@ func Load() (*Config, error) {
 	cfg.HTTPPort = getEnvInt("HTTP_PORT", 8080)
 	cfg.WSPort = getEnvInt("WS_PORT", 8081)
 
-	cfg.CacheTTLSeconds = getEnvInt("CACHE_TTL_SECONDS", 300)
-	cfg.CacheSimilarityThreshold = getEnvFloat("CACHE_SIMILARITY_THRESHOLD", 0.05)
+	cfg.CacheTTLSeconds = getEnvInt("CACHE_TTL_SECONDS", 10)
+	cfg.CacheSimilarityThreshold = getEnvFloat("CACHE_SIMILARITY_THRESHOLD", 0.10)
 
 	cfg.WSPingIntervalSeconds = getEnvInt("WS_PING_INTERVAL_SECONDS", 30)
 	cfg.WSPongTimeoutSeconds = getEnvInt("WS_PONG_TIMEOUT_SECONDS", 10)

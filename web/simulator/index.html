@@ -302,7 +302,20 @@
 
   // ── AI Actions panel ───────────────────────────────────────────────────────
 
+  // Track seen card keys to prevent duplicates on reconnect or double-broadcast.
+  const seenCards = new Set();
+
   function appendTipCard(payload, timestamp) {
+    // Deduplicate by batch_id + tip_type — same card should never appear twice.
+    const cardKey = `${payload.batch_id}|${payload.tip_type}|${payload.expert_handle}`;
+    if (seenCards.has(cardKey)) return;
+    seenCards.add(cardKey);
+    // Keep the set bounded so it doesn't grow forever during long streams.
+    if (seenCards.size > 500) {
+      const first = seenCards.values().next().value;
+      seenCards.delete(first);
+    }
+
     const panel = document.getElementById('ai-panel');
     clearEmptyState(panel);
 
@@ -310,11 +323,15 @@
       ? (payload.sentiment_score * 100).toFixed(0) + '%'
       : '—';
 
+    const typeColors = { sentiment: '#3ea6ff', expert_tip: '#7fff7f', highlight: '#ffcc00' };
+    const borderColor = typeColors[payload.tip_type] || '#3ea6ff';
+
     const card = document.createElement('div');
     card.className = 'tip-card';
+    card.style.borderLeftColor = borderColor;
     card.innerHTML = `
       <div class="tc-header">
-        <span class="tc-type">${escHtml(payload.tip_type || 'tip')}</span>
+        <span class="tc-type" style="color:${borderColor}">${escHtml(payload.tip_type || 'tip')}</span>
         <span class="tc-score">Sentiment: <span>${sentimentPct}</span></span>
       </div>
       <div class="tc-message">${escHtml(payload.message || '')}</div>
